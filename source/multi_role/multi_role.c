@@ -127,12 +127,25 @@
 
 #define DEFAULT_ENABLE_HID                      FALSE
 
+#define SCAN_DEVICE_MAX     10   // 最多收集的设备数（满则触发）
+#define SCAN_TOTAL_SECONDS      5   // 总扫描时间（秒）
+#define SCAN_WINDOW_MAX         (SCAN_TOTAL_SECONDS * 20)   // 因为 1秒 = 1000ms，窗口50ms → 每秒20次
+
 
 /*********************************************************************
     GLOBAL VARIABLES
 */
 uint16 MR_WakeupCnt = 0;
+typedef struct {
+    uint8 addr[B_ADDR_LEN];
+    uint8 addrType;
+    int8  rssi;
+} scan_device_t;
 
+static scan_device_t g_scanDevices[SCAN_DEVICE_MAX];
+static uint8 g_scanDevCount = 0;
+static uint8 g_scanWindowCount = 0;
+static bool  g_scanCollecting = true;   // 是否处于收集模式
 /*********************************************************************
     EXTERNAL VARIABLES
 */
@@ -847,67 +860,196 @@ static uint8 isTargetDeviceName(const uint8* advData, uint8 advLen,
     return FALSE;
 }
 
-static void multiRoleScanDoneCB( GAPMultiRolScanner_t* node )
+//static void multiRoleScanDoneCB( GAPMultiRolScanner_t* node )
+//{
+//    muliSchedule_config( MULTI_SCH_SCAN_MODE, 0x00 );
+
+//    while( node )
+//    {
+//        if( multi_devInLinkList( node->addr ) == FALSE ) {
+//            uint8 isTarget = isTargetDeviceName(node->advData, node->advDatalen,
+//                                                   node->rspData, node->scanRsplen);
+//            if (isTarget) {
+//                multiAddSlaveConnList( node->addrtype,node->addr );
+//            }
+//            LOG("[Device Filter] RSSI: %d, Addr: %s\n ",
+//                    node->rssi, bdAddr2Str(node->addr));
+//        }
+
+////        LOG("node %p\n",node);
+////        LOG( bdAddr2Str( node->addr ) );
+////        LOG("--addrtype %d\n",node->addrtype);
+
+//        if( node->advDatalen > 0)
+//        {
+////            LOG("advDatalen %d\n",node->advDatalen);
+////            for( uint8 i=0; i<node->advDatalen; i++)
+////                LOG("0x%02X,",node->advData[i]);
+////            LOG("\n");
+//        }
+
+//        if( node->scanRsplen > 0 )
+//        {
+////            LOG("scanRsplen %d\n",node->scanRsplen);
+////            for( uint8 i=0; i<node->scanRsplen; i++)
+////                LOG("0x%02X,",node->rspData[i]);
+////            LOG("\n");
+//        }
+
+////        LOG("\n");
+//        node = node->next;
+//    }
+
+//    if( multiGetSlaveConnList() != NULL )
+//    {
+//        ///bugfix: multi add init node 2022 08 05
+//        uint8 scan_init_node_num = 0, curr_master_conn_num = 0;
+//        scan_init_node_num =  multiRole_findInitScanNode();
+//        curr_master_conn_num = multiLinkGetMasterConnNum();
+
+//        if(scan_init_node_num < (MAX_CONNECTION_MASTER_NUM - curr_master_conn_num))
+//            muliSchedule_config( MULTI_SCH_INITIATOR_MODE, 0x01 );
+//    }
+//    else
+//    {
+//        //2022 02 14 Increased probability of scanning adv devices
+//        uint8  rand_char;
+//        TRNG_Rand(&rand_char,1);
+//        GAP_SetParamValue( TGAP_GEN_DISC_SCAN, DEFAULT_SCAN_DURATION + (rand_char/*&0x0F*/) );
+//        GAP_SetParamValue( TGAP_LIM_DISC_SCAN, DEFAULT_SCAN_DURATION + (rand_char/*&0x0F*/) );
+//        muliSchedule_config( MULTI_SCH_SCAN_MODE, 0x01 );
+//    }
+//}
+
+// 从广播数据或扫描响应数据中提取设备名称（存入 dst 缓冲区，最大 len）
+static void extractDeviceName(const uint8* data, uint8 dataLen, char* dst, uint8 dstLen)
 {
-    muliSchedule_config( MULTI_SCH_SCAN_MODE, 0x00 );
-
-    while( node )
-    {
-        if( multi_devInLinkList( node->addr ) == FALSE ) {
-            uint8 isTarget = isTargetDeviceName(node->advData, node->advDatalen,
-                                                   node->rspData, node->scanRsplen);
-            if (isTarget) {
-                multiAddSlaveConnList( node->addrtype,node->addr );
-            }
-            LOG("[Device Filter] RSSI: %d, Addr: %s\n ",
-                    node->rssi, bdAddr2Str(node->addr));
+    dst[0] = '\0';
+    uint8 idx = 0;
+    while (idx < dataLen) {
+        uint8 fieldLen = data[idx++];
+        if (fieldLen == 0 || idx + fieldLen > dataLen) break;
+        uint8 adType = data[idx];
+        if (adType == 0x09 || adType == 0x08) { // Complete or Shortened Local Name
+            uint8 nameLen = fieldLen - 1;
+            if (nameLen > dstLen - 1) nameLen = dstLen - 1;
+            osal_memcpy(dst, &data[idx + 1], nameLen);
+            dst[nameLen] = '\0';
+            return;
         }
-
-//        LOG("node %p\n",node);
-//        LOG( bdAddr2Str( node->addr ) );
-//        LOG("--addrtype %d\n",node->addrtype);
-
-        if( node->advDatalen > 0)
-        {
-//            LOG("advDatalen %d\n",node->advDatalen);
-//            for( uint8 i=0; i<node->advDatalen; i++)
-//                LOG("0x%02X,",node->advData[i]);
-//            LOG("\n");
-        }
-
-        if( node->scanRsplen > 0 )
-        {
-//            LOG("scanRsplen %d\n",node->scanRsplen);
-//            for( uint8 i=0; i<node->scanRsplen; i++)
-//                LOG("0x%02X,",node->rspData[i]);
-//            LOG("\n");
-        }
-
-//        LOG("\n");
-        node = node->next;
-    }
-
-    if( multiGetSlaveConnList() != NULL )
-    {
-        ///bugfix: multi add init node 2022 08 05
-        uint8 scan_init_node_num = 0, curr_master_conn_num = 0;
-        scan_init_node_num =  multiRole_findInitScanNode();
-        curr_master_conn_num = multiLinkGetMasterConnNum();
-
-        if(scan_init_node_num < (MAX_CONNECTION_MASTER_NUM - curr_master_conn_num))
-            muliSchedule_config( MULTI_SCH_INITIATOR_MODE, 0x01 );
-    }
-    else
-    {
-        //2022 02 14 Increased probability of scanning adv devices
-        uint8  rand_char;
-        TRNG_Rand(&rand_char,1);
-        GAP_SetParamValue( TGAP_GEN_DISC_SCAN, DEFAULT_SCAN_DURATION + (rand_char/*&0x0F*/) );
-        GAP_SetParamValue( TGAP_LIM_DISC_SCAN, DEFAULT_SCAN_DURATION + (rand_char/*&0x0F*/) );
-        muliSchedule_config( MULTI_SCH_SCAN_MODE, 0x01 );
+        idx += fieldLen;
     }
 }
 
+static void multiRoleScanDoneCB( GAPMultiRolScanner_t* node )
+{
+	
+	  static bool cnt_start_flag = false;
+    // 1. 停止当前扫描
+    muliSchedule_config( MULTI_SCH_SCAN_MODE, 0x00 );
+
+    if (!g_scanCollecting) {
+        return;
+    }
+    if(cnt_start_flag  == true){
+		// 2. 增加扫描窗口计数
+			g_scanWindowCount++;
+		}
+
+
+    // 3. 遍历扫描结果
+    while (node != NULL && g_scanDevCount < SCAN_DEVICE_MAX)
+    {
+        char devName[32] = "Unknown";
+        // 尝试从广播数据和扫描响应数据中提取名称
+        if (node->advDatalen > 0) {
+            extractDeviceName(node->advData, node->advDatalen, devName, sizeof(devName));
+        }
+        if (devName[0] == '\0' && node->scanRsplen > 0) {
+            extractDeviceName(node->rspData, node->scanRsplen, devName, sizeof(devName));
+        }
+
+        // 检查设备名称是否为 "simple_ble"
+        if (isTargetDeviceName(node->advData, node->advDatalen,
+                               node->rspData, node->scanRsplen))
+        {
+            LOG("[Scan] Found target device: %s, RSSI: %d, Addr: %s\n",
+                devName, node->rssi, bdAddr2Str(node->addr));
+            cnt_start_flag = true;
+            // 去重检查
+            bool already = false;
+            for (uint8 i = 0; i < g_scanDevCount; i++) {
+                if (osal_memcmp(g_scanDevices[i].addr, node->addr, B_ADDR_LEN) == 1) {
+                    already = true;
+                    break;
+                }
+            }
+            if (!already && !multi_devInLinkList(node->addr)) {
+                osal_memcpy(g_scanDevices[g_scanDevCount].addr, node->addr, B_ADDR_LEN);
+                g_scanDevices[g_scanDevCount].addrType = node->addrtype;
+                g_scanDevices[g_scanDevCount].rssi = node->rssi;
+                g_scanDevCount++;
+                LOG("  -> Collected, total in list: %d\n", g_scanDevCount);
+            } else {
+                LOG("  -> Already in list or connected, skip.\n");
+            }
+        } else {
+            // 可选：打印非目标设备（调试用，可注释）
+            // LOG("[Scan] Ignore device: %s, RSSI: %d\n", devName, node->rssi);
+        }
+        node = node->next;
+    }
+
+    // 4. 判断触发条件
+    bool timeout_trigger = (g_scanWindowCount >= SCAN_WINDOW_MAX);
+    bool full_trigger = (g_scanDevCount >= SCAN_DEVICE_MAX);
+    bool trigger = full_trigger || timeout_trigger;
+
+    if (trigger) {
+        if (timeout_trigger) { //能够超时，就意味着必定有目标设备被发现，否则cnt_start_flag一直为false
+            LOG("*** Scan timeout after %d windows (%d ms) ***\n",
+                g_scanWindowCount, g_scanWindowCount * DEFAULT_SCAN_DURATION);
+        }
+        if (full_trigger) {
+            LOG("*** Collected max devices (%d) ***\n", SCAN_DEVICE_MAX);
+        }
+        
+        // 5. RSSI 排序（降序）
+        for (uint8 i = 0; i < g_scanDevCount - 1; i++) {
+            for (uint8 j = i + 1; j < g_scanDevCount; j++) {
+                if (g_scanDevices[i].rssi < g_scanDevices[j].rssi) {
+                    scan_device_t tmp = g_scanDevices[i];
+                    g_scanDevices[i] = g_scanDevices[j];
+                    g_scanDevices[j] = tmp;
+                }
+            }
+        }
+
+        // 6. 取前 MAX_CONNECTION_SLAVE_NUM 个设备连接
+        uint8 connectNum = (g_scanDevCount < MAX_CONNECTION_SLAVE_NUM) ?
+                           g_scanDevCount : MAX_CONNECTION_SLAVE_NUM;
+        LOG("Sorted devices, will connect to top %d (max allowed %d):\n",
+            connectNum, MAX_CONNECTION_SLAVE_NUM);
+        for (uint8 i = 0; i < connectNum; i++) {
+            LOG("  [%d] Addr: %s, RSSI: %d\n",
+                i, bdAddr2Str(g_scanDevices[i].addr), g_scanDevices[i].rssi);
+            multiAddSlaveConnList(g_scanDevices[i].addrType, g_scanDevices[i].addr);
+        }
+
+        // 7. 清空状态，停止扫描，发起连接
+				cnt_start_flag = false;
+        g_scanCollecting = false;
+        g_scanDevCount = 0;
+        g_scanWindowCount = 0;
+        muliSchedule_config(MULTI_SCH_INITIATOR_MODE, 0x01);
+    } else {
+        // 8. 继续扫描
+        LOG("Scan continue, window %d/%d, collected %d/%d\n",
+            g_scanWindowCount, SCAN_WINDOW_MAX,
+            g_scanDevCount, SCAN_DEVICE_MAX);
+        muliSchedule_config(MULTI_SCH_SCAN_MODE, 0x01);
+    }
+}
 #endif
 
 /*********************************************************************
