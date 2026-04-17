@@ -31,7 +31,7 @@ extern "C"
 
 // Device filter debug printing
 #define ENABLE_DEVICE_FILTER_DEBUG                    1
-
+#define RE_SCANCOLLECT                                1
 
 /*********************************************************************
     MACROS

@@ -179,6 +179,7 @@ uint8 multiRole_TaskId;
     static void multiRoleNotifyCB(uint16 connHandle,uint16 len,uint8* data );
     static void multiRoleEachScanCB( gapDeviceInfoEvent_t* pPkt );
     static void multiRoleScanDoneCB( GAPMultiRolScanner_t* node );
+		static uint8 multi_devInConnectedList(uint8* addr);
 #endif
 static void multiRoleAPP_ComInit(void);
 static void multiRoleEstablishCB( uint8 status, uint16 connHandle,GAPMultiRole_State_t role,uint8 perIdx,uint8* addr );
@@ -190,6 +191,7 @@ extern void ll_dbg_show(void);
 extern void TRNG_INIT(void);
 extern uint8 TRNG_Rand(uint8* buf,uint8 len);
 extern uint8 gapMultiRole_TaskID;
+extern GAPMultiRoleLinkCtrl_t* g_multiLinkInfo;
 /*********************************************************************
     LOCAL VARIABLES
 */
@@ -473,18 +475,23 @@ static void multiRoleEstablishCB( uint8 status,uint16 connHandle,GAPMultiRole_St
                 uint8 scan_init_node_num = 0, curr_master_conn_num = 0;
                 scan_init_node_num =  multiRole_findInitScanNode();
                 curr_master_conn_num = multiLinkGetMasterConnNum();
-
+               LOG("curr_master_conn_num = %d\n",curr_master_conn_num);
                 if(scan_init_node_num < (MAX_CONNECTION_MASTER_NUM - curr_master_conn_num))
                     muliSchedule_config( MULTI_SCH_INITIATOR_MODE, 0x01 );
 
                 ///2022 08 08  prevent the number of connections  smaller than the configured master number,so add scan node to find others slave devices
                 if( multiLinkGetMasterConnNum() < MAX_CONNECTION_MASTER_NUM )
                 {
+
                     muliSchedule_config( MULTI_SCH_SCAN_MODE, 0x01 );
                 }
             }
             else if( multiLinkGetMasterConnNum() < MAX_CONNECTION_MASTER_NUM )
             {
+							  #if RE_SCANCOLLECT
+								g_scanCollecting = true; //重新开始收集
+								LOG("re_start coll\n");
+								#endif
                 muliSchedule_config( MULTI_SCH_SCAN_MODE, 0x01 );
             }
             else
@@ -984,7 +991,7 @@ static void multiRoleScanDoneCB( GAPMultiRolScanner_t* node )
                     break;
                 }
             }
-            if (!already && !multi_devInLinkList(node->addr)) {
+            if (!already && !multi_devInLinkList(node->addr) &&! multi_devInConnectedList(node->addr)) {
                 osal_memcpy(g_scanDevices[g_scanDevCount].addr, node->addr, B_ADDR_LEN);
                 g_scanDevices[g_scanDevCount].addrType = node->addrtype;
                 g_scanDevices[g_scanDevCount].rssi = node->rssi;
@@ -995,7 +1002,7 @@ static void multiRoleScanDoneCB( GAPMultiRolScanner_t* node )
             }
         } else {
             // 可选：打印非目标设备（调试用，可注释）
-            // LOG("[Scan] Ignore device: %s, RSSI: %d\n", devName, node->rssi);
+            LOG("[Scan] Ignore device: %s, RSSI: %d\n", devName, node->rssi);
         }
         node = node->next;
     }
@@ -1025,11 +1032,11 @@ static void multiRoleScanDoneCB( GAPMultiRolScanner_t* node )
             }
         }
 
-        // 6. 取前 MAX_CONNECTION_SLAVE_NUM 个设备连接
-        uint8 connectNum = (g_scanDevCount < MAX_CONNECTION_SLAVE_NUM) ?
-                           g_scanDevCount : MAX_CONNECTION_SLAVE_NUM;
+        // 6. 取前 MAX_CONNECTION_MAX_NUM 个设备连接
+        uint8 connectNum = (g_scanDevCount < MAX_CONNECTION_MASTER_NUM) ?
+                           g_scanDevCount : MAX_CONNECTION_MASTER_NUM;
         LOG("Sorted devices, will connect to top %d (max allowed %d):\n",
-            connectNum, MAX_CONNECTION_SLAVE_NUM);
+            connectNum, MAX_CONNECTION_MASTER_NUM);
         for (uint8 i = 0; i < connectNum; i++) {
             LOG("  [%d] Addr: %s, RSSI: %d\n",
                 i, bdAddr2Str(g_scanDevices[i].addr), g_scanDevices[i].rssi);
@@ -1041,6 +1048,7 @@ static void multiRoleScanDoneCB( GAPMultiRolScanner_t* node )
         g_scanCollecting = false;
         g_scanDevCount = 0;
         g_scanWindowCount = 0;
+				
         muliSchedule_config(MULTI_SCH_INITIATOR_MODE, 0x01);
     } else {
         // 8. 继续扫描
@@ -1050,6 +1058,21 @@ static void multiRoleScanDoneCB( GAPMultiRolScanner_t* node )
         muliSchedule_config(MULTI_SCH_SCAN_MODE, 0x01);
     }
 }
+
+
+// 新增函数：检查地址是否已连接
+static uint8 multi_devInConnectedList(uint8* addr)
+{
+    GAPMultiRoleLinkCtrl_t* link = g_multiLinkInfo;
+    while (link) {
+        if (osal_memcmp(link->peerDevAddr, addr, B_ADDR_LEN) == 1) {
+            return TRUE;
+        }
+        link = link->next;
+    }
+    return FALSE;
+}
+
 #endif
 
 /*********************************************************************
